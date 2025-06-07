@@ -1,0 +1,133 @@
+# PR Agent - AI-Powered PR Analysis and Description Generation
+# Automatically generates comprehensive PR descriptions using OpenAI
+
+name: 🤖 PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr-agent:
+    name: 🤖 AI PR Analysis
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.draft == false }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: PR Agent - Auto Description
+        if: github.event.action == 'opened' || github.event.action == 'reopened'
+        uses: Codium-ai/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          command: /describe
+          args: --pr_description.add_original_user_description=true --pr_description.keep_original_user_title=true
+
+      - name: PR Agent - Auto Review
+        if: github.event.action == 'synchronize' || (github.event.action == 'opened' && github.event.pull_request.commits > 1)
+        uses: Codium-ai/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          command: /review
+          args: --pr_reviewer.num_code_suggestions=3 --pr_reviewer.inline_code_comments=true
+
+      - name: PR Agent - Improve Code
+        if: github.event.action == 'synchronize'
+        uses: Codium-ai/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          command: /improve
+          args: --pr_code_suggestions.num_code_suggestions=2
+
+  pr-agent-chat:
+    name: 🗨️ PR Agent Chat
+    runs-on: ubuntu-latest
+    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, '/ask') }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: PR Agent Chat
+        uses: Codium-ai/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          command: /ask
+          args: ${{ github.event.comment.body }}
+
+  pr-agent-commands:
+    name: 📝 PR Agent Commands
+    runs-on: ubuntu-latest
+    if: |
+      github.event.issue.pull_request && 
+      (contains(github.event.comment.body, '/review') || 
+       contains(github.event.comment.body, '/describe') || 
+       contains(github.event.comment.body, '/improve') ||
+       contains(github.event.comment.body, '/test') ||
+       contains(github.event.comment.body, '/help'))
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract command
+        id: extract
+        run: |
+          comment="${{ github.event.comment.body }}"
+          if [[ "$comment" == *"/review"* ]]; then
+            echo "command=/review" >> $GITHUB_OUTPUT
+            echo "args=--pr_reviewer.num_code_suggestions=3 --pr_reviewer.inline_code_comments=true" >> $GITHUB_OUTPUT
+          elif [[ "$comment" == *"/describe"* ]]; then
+            echo "command=/describe" >> $GITHUB_OUTPUT
+            echo "args=--pr_description.add_original_user_description=true" >> $GITHUB_OUTPUT
+          elif [[ "$comment" == *"/improve"* ]]; then
+            echo "command=/improve" >> $GITHUB_OUTPUT
+            echo "args=--pr_code_suggestions.num_code_suggestions=3" >> $GITHUB_OUTPUT
+          elif [[ "$comment" == *"/test"* ]]; then
+            echo "command=/test" >> $GITHUB_OUTPUT
+            echo "args=" >> $GITHUB_OUTPUT
+          elif [[ "$comment" == *"/help"* ]]; then
+            echo "command=/help" >> $GITHUB_OUTPUT
+            echo "args=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run PR Agent Command
+        if: steps.extract.outputs.command != ''
+        uses: Codium-ai/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          command: ${{ steps.extract.outputs.command }}
+          args: ${{ steps.extract.outputs.args }}
+
+      - name: Add reaction to comment
+        if: steps.extract.outputs.command != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: ${{ github.event.comment.id }},
+              content: '+1'
+            })
