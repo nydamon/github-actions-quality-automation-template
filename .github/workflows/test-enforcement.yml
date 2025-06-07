@@ -1,0 +1,431 @@
+# Test Enforcement Workflow - Risk-based testing requirements
+# Analyzes code changes and enforces appropriate testing standards
+
+name: 🧪 Test Enforcement
+
+on:
+  pull_request:
+    branches: [ main, develop, master ]
+  workflow_dispatch:
+
+env:
+  FORCE_COLOR: 1
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+  PHP_VERSION: '8.2'
+
+jobs:
+  analyze-changes:
+    name: 🔍 Analyze Changes
+    runs-on: ubuntu-latest
+    outputs:
+      tier: ${{ steps.classify.outputs.tier }}
+      requires_tests: ${{ steps.classify.outputs.requires_tests }}
+      test_explanation: ${{ steps.classify.outputs.test_explanation }}
+      changed_files: ${{ steps.changes.outputs.changed_files }}
+      languages: ${{ steps.detect.outputs.languages }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changes
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            changed_files=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }})
+          else
+            changed_files=$(git diff --name-only HEAD~1..HEAD)
+          fi
+          
+          echo "Changed files:"
+          echo "$changed_files"
+          
+          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+          echo "$changed_files" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Detect languages
+        id: detect
+        run: |
+          languages=()
+          changed_files="${{ steps.changes.outputs.changed_files }}"
+          
+          if echo "$changed_files" | grep -E '\.(js|jsx|ts|tsx)$' >/dev/null || [[ -f "package.json" ]]; then
+            languages+=("javascript")
+            echo "🟨 Detected: JavaScript/TypeScript/React changes"
+          fi
+          
+          if echo "$changed_files" | grep -E '\.py$' >/dev/null; then
+            languages+=("python")
+            echo "🐍 Detected: Python changes"
+          fi
+          
+          if echo "$changed_files" | grep -E '\.php$' >/dev/null; then
+            languages+=("php")
+            echo "🐘 Detected: PHP changes"
+          fi
+          
+          languages_json=$(printf '%s\n' "${languages[@]}" | jq -R . | jq -s .)
+          echo "languages=$languages_json" >> $GITHUB_OUTPUT
+
+      - name: Classify changes and determine testing requirements
+        id: classify
+        run: |
+          changed_files="${{ steps.changes.outputs.changed_files }}"
+          echo "Analyzing changed files for testing requirements..."
+          
+          tier="3"
+          requires_tests="false"
+          explanation=""
+          
+          # Check for test exception annotations
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            pr_body="${{ github.event.pull_request.body }}"
+            if echo "$pr_body" | grep -E "@testException" >/dev/null; then
+              echo "🚫 Test exception found in PR description"
+              tier="0"
+              requires_tests="false"
+              explanation="Testing requirements waived via @testException annotation."
+              echo "tier=$tier" >> $GITHUB_OUTPUT
+              echo "requires_tests=$requires_tests" >> $GITHUB_OUTPUT
+              echo "test_explanation=$explanation" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          
+          # Tier 1: Critical paths (Must-Have Tests)
+          tier1_patterns=(
+            "auth/"
+            "authentication/"
+            "login/"
+            "payment/"
+            "billing/"
+            "security/"
+            "admin/"
+            "api/auth"
+            "middleware/auth"
+            "guards/"
+            "permissions/"
+          )
+          
+          # Tier 2: Important changes (Contextual Tests)
+          tier2_patterns=(
+            "api/"
+            "components/"
+            "pages/"
+            "views/"
+            "controllers/"
+            "services/"
+            "models/"
+            "routes/"
+            "utils/"
+            "helpers/"
+            "lib/"
+            "src/"
+          )
+          
+          # Tier 3: Optional (Documentation, config, etc.)
+          tier3_patterns=(
+            "README"
+            "CHANGELOG"
+            "LICENSE"
+            ".md$"
+            ".txt$"
+            ".json$"
+            ".yaml$"
+            ".yml$"
+            ".xml$"
+            "config/"
+            "docs/"
+            "documentation/"
+            ".env"
+            ".gitignore"
+            "package.json"
+            "composer.json"
+            "requirements.txt"
+          )
+          
+          # Check each changed file against patterns
+          echo "Checking files against tier patterns..."
+          
+          for file in $changed_files; do
+            echo "Analyzing: $file"
+            
+            # Check Tier 1 patterns (highest priority)
+            for pattern in "${tier1_patterns[@]}"; do
+              if echo "$file" | grep -E "$pattern" >/dev/null; then
+                echo "  🔴 Tier 1 (Critical): $file matches $pattern"
+                tier="1"
+                requires_tests="true"
+                break 2
+              fi
+            done
+            
+            # Check Tier 2 patterns (only if not already Tier 1)
+            if [[ "$tier" != "1" ]]; then
+              for pattern in "${tier2_patterns[@]}"; do
+                if echo "$file" | grep -E "$pattern" >/dev/null; then
+                  echo "  🟡 Tier 2 (Important): $file matches $pattern"
+                  tier="2"
+                  requires_tests="true"
+                  break
+                fi
+              done
+            fi
+          done
+          
+          # Check if files are only Tier 3 (docs/config)
+          all_tier3=true
+          for file in $changed_files; do
+            is_tier3=false
+            for pattern in "${tier3_patterns[@]}"; do
+              if echo "$file" | grep -E "$pattern" >/dev/null; then
+                is_tier3=true
+                break
+              fi
+            done
+            if [[ "$is_tier3" == "false" ]]; then
+              all_tier3=false
+              break
+            fi
+          done
+          
+          if [[ "$all_tier3" == "true" ]] && [[ "$tier" == "3" ]]; then
+            echo "  🟢 All changes are Tier 3 (Documentation/Config)"
+            requires_tests="false"
+          fi
+          
+          # Generate explanation based on tier
+          case $tier in
+            "1")
+              explanation="🔴 **Tier 1 - Critical**: Changes affect authentication, payment, or security code. Comprehensive testing required including unit tests, integration tests, and security validation."
+              ;;
+            "2")
+              explanation="🟡 **Tier 2 - Important**: Changes affect core application logic. Standard testing required including unit tests and integration tests for affected components."
+              ;;
+            "3")
+              explanation="🟢 **Tier 3 - Optional**: Changes are documentation, configuration, or low-risk. Testing is optional but recommended for any logic changes."
+              ;;
+            "0")
+              explanation="⚠️ **Testing Waived**: @testException annotation found in PR description."
+              ;;
+          esac
+          
+          echo "Final classification:"
+          echo "  Tier: $tier"
+          echo "  Requires Tests: $requires_tests"
+          echo "  Explanation: $explanation"
+          
+          echo "tier=$tier" >> $GITHUB_OUTPUT
+          echo "requires_tests=$requires_tests" >> $GITHUB_OUTPUT
+          echo "test_explanation=$explanation" >> $GITHUB_OUTPUT
+
+  check-tests:
+    name: 🔍 Check Existing Tests
+    runs-on: ubuntu-latest
+    needs: analyze-changes
+    if: needs.analyze-changes.outputs.requires_tests == 'true'
+    outputs:
+      has_tests: ${{ steps.find-tests.outputs.has_tests }}
+      test_files: ${{ steps.find-tests.outputs.test_files }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Find existing tests
+        id: find-tests
+        run: |
+          echo "Looking for existing tests..."
+          
+          test_files=""
+          has_tests="false"
+          
+          # JavaScript/TypeScript test patterns
+          if echo '${{ needs.analyze-changes.outputs.languages }}' | grep -q 'javascript'; then
+            js_tests=$(find . -name "*.test.js" -o -name "*.test.ts" -o -name "*.test.jsx" -o -name "*.test.tsx" -o -name "*.spec.js" -o -name "*.spec.ts" -o -name "*.spec.jsx" -o -name "*.spec.tsx" | head -10)
+            if [[ -n "$js_tests" ]]; then
+              has_tests="true"
+              test_files+="JavaScript/TypeScript tests found:\n$js_tests\n\n"
+              echo "✅ Found JavaScript/TypeScript tests"
+            fi
+          fi
+          
+          # Python test patterns
+          if echo '${{ needs.analyze-changes.outputs.languages }}' | grep -q 'python'; then
+            py_tests=$(find . -name "test_*.py" -o -name "*_test.py" | head -10)
+            if [[ -n "$py_tests" ]]; then
+              has_tests="true"
+              test_files+="Python tests found:\n$py_tests\n\n"
+              echo "✅ Found Python tests"
+            fi
+          fi
+          
+          # PHP test patterns
+          if echo '${{ needs.analyze-changes.outputs.languages }}' | grep -q 'php'; then
+            php_tests=$(find . -name "*Test.php" -o -name "*TestCase.php" | head -10)
+            if [[ -n "$php_tests" ]]; then
+              has_tests="true"
+              test_files+="PHP tests found:\n$php_tests\n\n"
+              echo "✅ Found PHP tests"
+            fi
+          fi
+          
+          if [[ "$has_tests" == "false" ]]; then
+            echo "⚠️ No tests found"
+            test_files="No existing tests found for the detected languages."
+          fi
+          
+          echo "has_tests=$has_tests" >> $GITHUB_OUTPUT
+          echo "test_files<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$test_files" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+  enforce-requirements:
+    name: ⚖️ Enforce Testing Requirements
+    runs-on: ubuntu-latest
+    needs: [analyze-changes, check-tests]
+    if: always()
+    steps:
+      - name: Evaluate testing requirements
+        id: evaluate
+        run: |
+          tier="${{ needs.analyze-changes.outputs.tier }}"
+          requires_tests="${{ needs.analyze-changes.outputs.requires_tests }}"
+          has_tests="${{ needs.check-tests.outputs.has_tests }}"
+          
+          echo "Evaluating testing requirements..."
+          echo "Tier: $tier"
+          echo "Requires Tests: $requires_tests"
+          echo "Has Tests: $has_tests"
+          
+          requirements_met="true"
+          failure_reason=""
+          
+          if [[ "$requires_tests" == "true" ]]; then
+            if [[ "$tier" == "1" ]]; then
+              # Tier 1: Critical - Must have comprehensive tests
+              if [[ "$has_tests" != "true" ]]; then
+                requirements_met="false"
+                failure_reason="Tier 1 (Critical) changes require comprehensive testing, but no tests were found."
+              fi
+            elif [[ "$tier" == "2" ]]; then
+              # Tier 2: Important - Should have tests
+              if [[ "$has_tests" != "true" ]]; then
+                requirements_met="false"
+                failure_reason="Tier 2 (Important) changes require testing, but no tests were found."
+              fi
+            fi
+          fi
+          
+          echo "requirements_met=$requirements_met" >> $GITHUB_OUTPUT
+          echo "failure_reason=$failure_reason" >> $GITHUB_OUTPUT
+
+      - name: Post test requirements comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const tier = '${{ needs.analyze-changes.outputs.tier }}';
+            const requiresTests = '${{ needs.analyze-changes.outputs.requires_tests }}';
+            const hasTests = '${{ needs.check-tests.outputs.has_tests }}';
+            const testExplanation = `${{ needs.analyze-changes.outputs.test_explanation }}`;
+            const testFiles = `${{ needs.check-tests.outputs.test_files }}`;
+            const requirementsMet = '${{ steps.evaluate.outputs.requirements_met }}';
+            const failureReason = '${{ steps.evaluate.outputs.failure_reason }}';
+            
+            let body = '## 🧪 Test Enforcement Report\n\n';
+            
+            // Add tier classification
+            body += `### Classification\n${testExplanation}\n\n`;
+            
+            // Add test status
+            if (requiresTests === 'true') {
+              body += '### Test Status\n';
+              
+              if (hasTests === 'true') {
+                body += '✅ **Tests Found**\n\n';
+                body += `**Existing Tests:**\n\`\`\`\n${testFiles}\`\`\`\n\n`;
+              } else {
+                body += '❌ **No Tests Found**\n\n';
+                body += 'No existing tests were detected for the languages in this PR.\n\n';
+              }
+              
+              // Add requirements status
+              if (requirementsMet === 'true') {
+                body += '### ✅ Requirements Status\n';
+                body += '**Testing requirements are satisfied!**\n\n';
+              } else {
+                body += '### ❌ Requirements Status\n';
+                body += `**Testing requirements not met:** ${failureReason}\n\n`;
+                
+                // Add guidance
+                body += '### 💡 Next Steps\n';
+                
+                if (tier === '1') {
+                  body += '**Critical changes require comprehensive testing:**\n';
+                  body += '- Add unit tests for all modified functions\n';
+                  body += '- Add integration tests for API endpoints\n';
+                  body += '- Add security tests if applicable\n';
+                  body += '- Ensure edge cases are covered\n\n';
+                } else if (tier === '2') {
+                  body += '**Important changes require standard testing:**\n';
+                  body += '- Add unit tests for modified components\n';
+                  body += '- Add integration tests for new features\n';
+                  body += '- Test error handling and edge cases\n\n';
+                }
+                
+                body += '**Quick commands to get started:**\n';
+                body += '```bash\n';
+                body += '# JavaScript/TypeScript\n';
+                body += 'npm test\n';
+                body += 'npm run test:coverage\n';
+                body += '\n';
+                body += '# Python\n';
+                body += 'pytest\n';
+                body += 'pytest --cov=src\n';
+                body += '\n';
+                body += '# PHP\n';
+                body += 'phpunit\n';
+                body += '```\n\n';
+                
+                body += '📚 See [Quality Automation Guide](./QUALITY_AUTOMATION.md) for detailed testing guidelines.';
+              }
+            } else {
+              body += '### ℹ️ Test Status\n';
+              body += '**Testing is optional for these changes.**\n\n';
+              
+              if (tier === '3') {
+                body += 'These changes are primarily documentation or configuration updates that don\'t require testing.\n';
+              } else if (tier === '0') {
+                body += 'Testing requirements have been waived via @testException annotation.\n';
+              }
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Fail if requirements not met
+        if: steps.evaluate.outputs.requirements_met == 'false'
+        run: |
+          echo "❌ Testing requirements not met"
+          echo "${{ steps.evaluate.outputs.failure_reason }}"
+          echo ""
+          echo "💡 Please add appropriate tests for your changes."
+          echo "📚 See QUALITY_AUTOMATION.md for testing guidelines."
+          exit 1
+
+      - name: Success message
+        if: steps.evaluate.outputs.requirements_met == 'true'
+        run: |
+          echo "✅ Testing requirements satisfied!"
+          if [[ "${{ needs.analyze-changes.outputs.requires_tests }}" == "true" ]]; then
+            echo "🧪 Tests found and requirements met."
+          else
+            echo "ℹ️ No testing required for these changes."
+          fi
