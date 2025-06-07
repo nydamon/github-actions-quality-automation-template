@@ -1,0 +1,44 @@
+parameters:
+    level: 8
+    paths:
+        - src
+        - app
+    excludePaths:
+        - vendor
+        - node_modules
+        - storage
+        - bootstrap/cache
+        - public/build
+        - resources/views/cache
+        - database/migrations
+        - tests/fixtures
+    
+    # Ignore common Laravel/framework patterns
+    ignoreErrors:
+        # Ignore missing return type declarations on migrations
+        - '#Method .+Migration::[a-zA-Z0-9_]+\(\) has no return typehint specified#'
+        
+        # Ignore missing property type declarations in models
+        - '#Property .+::\$[a-zA-Z0-9_]+ has no typehint specified#'
+        
+        # Ignore dynamic property access in models/eloquent
+        - '#Access to an undefined property [a-zA-Z0-9_\\]+::\$[a-zA-Z0-9_]+#'
+        
+        # Ignore missing closure return types in common patterns
+        - '#Closure in .+ has no return typehint specified#'
+    
+    # Additional checks
+    checkMissingIterableValueType: false
+    checkGenericClassInNonGenericObjectType: false
+    checkTooWideReturnTypesInProtectedAndPublicMethods: true
+    checkUninitializedProperties: true
+    checkDynamicProperties: false
+    
+    # Memory limit for analysis
+    memoryLimitFile: 512M
+    
+    # Report unmatched ignored errors
+    reportUnmatchedIgnoredErrors: false
+    
+    # Treat PHP doc types as native
+    treatPhpDocTypesAsCertain: true
