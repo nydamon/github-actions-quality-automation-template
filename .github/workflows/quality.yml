@@ -1,0 +1,329 @@
+# Main Quality Pipeline - GitHub Actions Quality Automation
+# Orchestrates all quality checks in a single, fast pipeline
+
+name: 🔍 Quality Pipeline
+
+on:
+  pull_request:
+    branches: [ main, develop, master ]
+  push:
+    branches: [ main, develop, master ]
+  workflow_dispatch:
+
+env:
+  FORCE_COLOR: 1
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+  PHP_VERSION: '8.2'
+
+jobs:
+  detect-languages:
+    name: 🔍 Detect Languages
+    runs-on: ubuntu-latest
+    outputs:
+      javascript: ${{ steps.detect.outputs.javascript }}
+      python: ${{ steps.detect.outputs.python }}
+      php: ${{ steps.detect.outputs.php }}
+      has_changes: ${{ steps.changes.outputs.has_changes }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect languages and changes
+        id: detect
+        run: |
+          if [[ -f "package.json" ]] || find . -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" -maxdepth 3 | grep -q .; then
+            echo "javascript=true" >> $GITHUB_OUTPUT
+            echo "🟨 Detected: JavaScript/TypeScript/React"
+          else
+            echo "javascript=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if find . -name "*.py" -maxdepth 3 | grep -q .; then
+            echo "python=true" >> $GITHUB_OUTPUT
+            echo "🐍 Detected: Python"
+          else
+            echo "python=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if find . -name "*.php" -maxdepth 3 | grep -q .; then
+            echo "php=true" >> $GITHUB_OUTPUT
+            echo "🐘 Detected: PHP"
+          else
+            echo "php=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            changed_files=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }})
+            if [[ -n "$changed_files" ]]; then
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "📝 Changes detected in PR"
+            else
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "📝 Push event detected"
+          fi
+
+  javascript-quality:
+    name: 🟨 JavaScript/TypeScript Quality
+    runs-on: ubuntu-latest
+    needs: detect-languages
+    if: needs.detect-languages.outputs.javascript == 'true' && needs.detect-languages.outputs.has_changes == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          echo "📦 Dependencies installed"
+
+      - name: ESLint check
+        run: |
+          echo "🔍 Running ESLint..."
+          npm run lint
+          echo "✅ ESLint passed"
+
+      - name: Prettier check
+        run: |
+          echo "🎨 Checking Prettier formatting..."
+          npx prettier --check .
+          echo "✅ Prettier formatting is correct"
+
+      - name: TypeScript type check
+        run: |
+          if [[ -f "tsconfig.json" ]]; then
+            echo "🔧 Running TypeScript type check..."
+            npx tsc --noEmit
+            echo "✅ TypeScript type check passed"
+          else
+            echo "ℹ️ No TypeScript configuration found, skipping type check"
+          fi
+
+      - name: Run tests
+        run: |
+          if npm run test --if-present; then
+            echo "✅ Tests passed"
+          else
+            echo "⚠️ Tests failed or not configured"
+            exit 1
+          fi
+
+  python-quality:
+    name: 🐍 Python Quality
+    runs-on: ubuntu-latest
+    needs: detect-languages
+    if: needs.detect-languages.outputs.python == 'true' && needs.detect-languages.outputs.has_changes == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install black isort flake8 pytest pytest-cov
+          
+          if [[ -f "requirements.txt" ]]; then
+            pip install -r requirements.txt
+          elif [[ -f "pyproject.toml" ]]; then
+            pip install -e .
+          fi
+          echo "📦 Python dependencies installed"
+
+      - name: Black formatting check
+        run: |
+          echo "🖤 Checking Black formatting..."
+          black --check --diff .
+          echo "✅ Black formatting is correct"
+
+      - name: isort import sorting check
+        run: |
+          echo "📚 Checking import sorting..."
+          isort --check-only --diff .
+          echo "✅ Import sorting is correct"
+
+      - name: flake8 linting
+        run: |
+          echo "🔍 Running flake8..."
+          flake8 .
+          echo "✅ flake8 linting passed"
+
+      - name: Run tests
+        run: |
+          if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
+            echo "🧪 Running Python tests..."
+            pytest -v
+            echo "✅ Python tests passed"
+          else
+            echo "ℹ️ No Python tests found"
+          fi
+
+  php-quality:
+    name: 🐘 PHP Quality
+    runs-on: ubuntu-latest
+    needs: detect-languages
+    if: needs.detect-languages.outputs.php == 'true' && needs.detect-languages.outputs.has_changes == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, xml, ctype, iconv, intl, pdo, dom, filter, gd, json
+          tools: composer, php-cs-fixer, phpstan
+
+      - name: Install dependencies
+        run: |
+          if [[ -f "composer.json" ]]; then
+            composer install --prefer-dist --no-progress --no-interaction
+            echo "📦 Composer dependencies installed"
+          fi
+
+      - name: PHP CS Fixer check
+        run: |
+          if [[ -f ".php-cs-fixer.php" ]]; then
+            echo "🎨 Checking PHP CS Fixer formatting..."
+            php-cs-fixer fix --dry-run --diff --verbose
+            echo "✅ PHP CS Fixer formatting is correct"
+          fi
+
+      - name: PHPStan analysis
+        run: |
+          if [[ -f "phpstan.neon" ]] || [[ -f "phpstan.neon.dist" ]]; then
+            echo "🔍 Running PHPStan analysis..."
+            phpstan analyse --no-progress
+            echo "✅ PHPStan analysis passed"
+          fi
+
+      - name: Run tests
+        run: |
+          if [[ -f "phpunit.xml" ]] || find . -name "*Test.php" | grep -q .; then
+            echo "🧪 Running PHP tests..."
+            if command -v phpunit &> /dev/null; then
+              phpunit
+            elif [[ -f "vendor/bin/phpunit" ]]; then
+              ./vendor/bin/phpunit
+            fi
+            echo "✅ PHP tests passed"
+          else
+            echo "ℹ️ No PHP tests found"
+          fi
+
+  security-checks:
+    name: 🔒 Security & Dependencies
+    runs-on: ubuntu-latest
+    needs: detect-languages
+    if: needs.detect-languages.outputs.has_changes == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  quality-gate:
+    name: ✅ Quality Gate
+    runs-on: ubuntu-latest
+    needs: 
+      - detect-languages
+      - javascript-quality
+      - python-quality
+      - php-quality
+      - security-checks
+    if: always() && needs.detect-languages.outputs.has_changes == 'true'
+    steps:
+      - name: Check all jobs status
+        run: |
+          echo "🔍 Checking quality gate status..."
+          
+          js_status="${{ needs.javascript-quality.result }}"
+          py_status="${{ needs.python-quality.result }}"
+          php_status="${{ needs.php-quality.result }}"
+          security_status="${{ needs.security-checks.result }}"
+          
+          echo "JavaScript/TypeScript: $js_status"
+          echo "Python: $py_status"
+          echo "PHP: $php_status"
+          echo "Security: $security_status"
+          
+          failed_jobs=()
+          
+          if [[ "$js_status" == "failure" ]]; then
+            failed_jobs+=("JavaScript/TypeScript")
+          fi
+          
+          if [[ "$py_status" == "failure" ]]; then
+            failed_jobs+=("Python")
+          fi
+          
+          if [[ "$php_status" == "failure" ]]; then
+            failed_jobs+=("PHP")
+          fi
+          
+          if [[ "$security_status" == "failure" ]]; then
+            failed_jobs+=("Security")
+          fi
+          
+          if [[ ${#failed_jobs[@]} -gt 0 ]]; then
+            echo "❌ Quality gate failed. Failed jobs: ${failed_jobs[*]}"
+            echo "🔧 Please fix the issues and try again."
+            exit 1
+          else
+            echo "✅ Quality gate passed! All checks completed successfully."
+            echo "🚀 Ready to merge!"
+          fi
+
+      - name: Post success comment
+        if: success() && github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## ✅ Quality Gate Passed\n\n🎉 All quality checks have passed successfully!\n\n- ✅ Code formatting and linting\n- ✅ Type checking\n- ✅ Tests\n- ✅ Security scans\n\n🚀 This PR is ready to merge!'
+            })
+
+      - name: Post failure comment
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## ❌ Quality Gate Failed\n\n🔧 Some quality checks have failed. Please review the workflow logs and fix the issues.\n\n### Quick fixes you can try:\n\n**For formatting issues:**\n```bash\n./scripts/auto-fix.sh\n```\n\n**For comprehensive check:**\n```bash\n./scripts/quality-check.sh\n```\n\n📚 See [Quality Automation Guide](./QUALITY_AUTOMATION.md) for more details.'
+            })

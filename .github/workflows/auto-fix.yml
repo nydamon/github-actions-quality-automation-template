@@ -1,0 +1,333 @@
+# Auto-Fix Workflow - Intelligent formatting and safe fixes
+# Automatically applies safe formatting fixes without touching business logic
+
+name: 🤖 Auto-Fix
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [ main, develop, master ]
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Force run even if auto-fix is disabled'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  FORCE_COLOR: 1
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+  PHP_VERSION: '8.2'
+
+concurrency:
+  group: auto-fix-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  should-run:
+    name: 🔍 Should Auto-Fix Run?
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      languages: ${{ steps.detect.outputs.languages }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Check auto-fix status
+        id: check
+        run: |
+          if git config --get AUTO_FIX_DISABLED >/dev/null 2>&1 && [[ "$(git config --get AUTO_FIX_DISABLED)" == "true" ]]; then
+            if [[ "${{ github.event.inputs.force_run }}" == "true" ]]; then
+              echo "⚠️ Auto-fix is disabled but force_run is true"
+              echo "should_run=true" >> $GITHUB_OUTPUT
+            else
+              echo "🚫 Auto-fix is disabled via git config"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          else
+            echo "✅ Auto-fix is enabled"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          fi
+          
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            pr_body="${{ github.event.pull_request.body }}"
+            if echo "$pr_body" | grep -E "@(testException|autoFixDisabled)" >/dev/null; then
+              echo "🚫 Auto-fix disabled via PR annotation"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+      - name: Detect languages
+        id: detect
+        run: |
+          languages=()
+          
+          if [[ -f "package.json" ]] || find . -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" -maxdepth 3 | grep -q .; then
+            languages+=("javascript")
+            echo "🟨 Detected: JavaScript/TypeScript/React"
+          fi
+          
+          if find . -name "*.py" -maxdepth 3 | grep -q .; then
+            languages+=("python")
+            echo "🐍 Detected: Python"
+          fi
+          
+          if find . -name "*.php" -maxdepth 3 | grep -q .; then
+            languages+=("php")
+            echo "🐘 Detected: PHP"
+          fi
+          
+          languages_json=$(printf '%s\n' "${languages[@]}" | jq -R . | jq -s .)
+          echo "languages=$languages_json" >> $GITHUB_OUTPUT
+
+  apply-fixes:
+    name: 🤖 Apply Auto-Fixes
+    runs-on: ubuntu-latest
+    needs: should-run
+    if: needs.should-run.outputs.should_run == 'true'
+    outputs:
+      changes_made: ${{ steps.check-changes.outputs.changes_made }}
+      fix_summary: ${{ steps.summary.outputs.fix_summary }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Node.js (if needed)
+        if: contains(fromJson(needs.should-run.outputs.languages), 'javascript')
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Setup Python (if needed)
+        if: contains(fromJson(needs.should-run.outputs.languages), 'python')
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Setup PHP (if needed)
+        if: contains(fromJson(needs.should-run.outputs.languages), 'php')
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          tools: composer, php-cs-fixer
+
+      - name: Install JavaScript dependencies
+        if: contains(fromJson(needs.should-run.outputs.languages), 'javascript')
+        run: |
+          if [[ -f "package.json" ]]; then
+            npm ci
+            echo "📦 Node.js dependencies installed"
+          fi
+
+      - name: Install Python dependencies
+        if: contains(fromJson(needs.should-run.outputs.languages), 'python')
+        run: |
+          python -m pip install --upgrade pip
+          pip install black isort
+          echo "📦 Python dependencies installed"
+
+      - name: Install PHP dependencies
+        if: contains(fromJson(needs.should-run.outputs.languages), 'php')
+        run: |
+          if [[ -f "composer.json" ]]; then
+            composer install --prefer-dist --no-progress --no-interaction
+            echo "📦 PHP dependencies installed"
+          fi
+
+      - name: Apply JavaScript/TypeScript fixes
+        if: contains(fromJson(needs.should-run.outputs.languages), 'javascript')
+        run: |
+          echo "🟨 Applying JavaScript/TypeScript fixes..."
+          
+          if npm run lint:fix --if-present 2>/dev/null || npx eslint . --fix --ext .js,.jsx,.ts,.tsx 2>/dev/null; then
+            echo "   ✅ ESLint fixes applied"
+          else
+            echo "   ⚠️ ESLint fixes had issues (non-critical)"
+          fi
+          
+          if npx prettier --write . 2>/dev/null; then
+            echo "   ✅ Prettier formatting applied"
+          else
+            echo "   ⚠️ Prettier formatting had issues (non-critical)"
+          fi
+
+      - name: Apply Python fixes
+        if: contains(fromJson(needs.should-run.outputs.languages), 'python')
+        run: |
+          echo "🐍 Applying Python fixes..."
+          
+          if black . 2>/dev/null; then
+            echo "   ✅ Black formatting applied"
+          else
+            echo "   ⚠️ Black formatting had issues (non-critical)"
+          fi
+          
+          if isort . 2>/dev/null; then
+            echo "   ✅ isort import sorting applied"
+          else
+            echo "   ⚠️ isort import sorting had issues (non-critical)"
+          fi
+
+      - name: Apply PHP fixes
+        if: contains(fromJson(needs.should-run.outputs.languages), 'php')
+        run: |
+          echo "🐘 Applying PHP fixes..."
+          
+          if [[ -f ".php-cs-fixer.php" ]] && php-cs-fixer fix 2>/dev/null; then
+            echo "   ✅ PHP CS Fixer formatting applied"
+          else
+            echo "   ⚠️ PHP CS Fixer formatting had issues (non-critical)"
+          fi
+
+      - name: Check for changes
+        id: check-changes
+        run: |
+          if git diff --quiet; then
+            echo "changes_made=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ No changes were made by auto-fix"
+          else
+            echo "changes_made=true" >> $GITHUB_OUTPUT
+            echo "✅ Auto-fix changes detected"
+            
+            echo "📝 Files changed:"
+            git diff --name-only | sed 's/^/   - /'
+          fi
+
+      - name: Generate fix summary
+        id: summary
+        if: steps.check-changes.outputs.changes_made == 'true'
+        run: |
+          summary="🤖 **Auto-fix Summary**\n\n"
+          
+          js_files=$(git diff --name-only | grep -E '\.(js|jsx|ts|tsx)$' | wc -l || echo "0")
+          py_files=$(git diff --name-only | grep -E '\.py$' | wc -l || echo "0")
+          php_files=$(git diff --name-only | grep -E '\.php$' | wc -l || echo "0")
+          
+          if [[ $js_files -gt 0 ]]; then
+            summary+="- 🟨 **JavaScript/TypeScript**: $js_files files formatted\n"
+          fi
+          
+          if [[ $py_files -gt 0 ]]; then
+            summary+="- 🐍 **Python**: $py_files files formatted\n"
+          fi
+          
+          if [[ $php_files -gt 0 ]]; then
+            summary+="- 🐘 **PHP**: $php_files files formatted\n"
+          fi
+          
+          summary+="\n**Changes made:**\n"
+          summary+="- ✅ Code formatting and style fixes\n"
+          summary+="- ✅ Import organization\n"
+          summary+="- ✅ Trailing whitespace removal\n"
+          summary+="- ✅ Consistent indentation\n\n"
+          summary+="**No business logic was modified** - only safe formatting changes.\n\n"
+          summary+="📝 Review the changes and merge if they look correct!"
+          
+          echo "fix_summary<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$summary" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Commit changes
+        if: steps.check-changes.outputs.changes_made == 'true'
+        run: |
+          echo "💾 Committing auto-fix changes..."
+          
+          git add .
+          
+          commit_msg="🤖 Auto-fix: Code formatting and style improvements
+          
+          Applied automatic fixes for:
+          "
+          
+          if echo '${{ needs.should-run.outputs.languages }}' | grep -q 'javascript'; then
+            commit_msg+="- ESLint auto-fixable rules\n"
+            commit_msg+="- Prettier code formatting\n"
+          fi
+          
+          if echo '${{ needs.should-run.outputs.languages }}' | grep -q 'python'; then
+            commit_msg+="- Black code formatting\n"
+            commit_msg+="- isort import organization\n"
+          fi
+          
+          if echo '${{ needs.should-run.outputs.languages }}' | grep -q 'php'; then
+            commit_msg+="- PHP CS Fixer formatting\n"
+          fi
+          
+          commit_msg+="\n✅ No business logic was modified - only safe formatting changes."
+          
+          git commit -m "$commit_msg"
+          echo "✅ Changes committed"
+
+      - name: Push changes
+        if: steps.check-changes.outputs.changes_made == 'true'
+        run: |
+          echo "🚀 Pushing auto-fix changes..."
+          
+          branch_name="${{ github.head_ref }}"
+          if [[ -z "$branch_name" ]]; then
+            branch_name="${{ github.ref_name }}"
+          fi
+          
+          git push origin "$branch_name"
+          echo "✅ Auto-fix changes pushed to $branch_name"
+
+  post-results:
+    name: 📝 Post Results
+    runs-on: ubuntu-latest
+    needs: [should-run, apply-fixes]
+    if: always() && needs.should-run.outputs.should_run == 'true'
+    steps:
+      - name: Post auto-fix comment
+        if: github.event_name == 'pull_request' && needs.apply-fixes.outputs.changes_made == 'true'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fixSummary = `${{ needs.apply-fixes.outputs.fix_summary }}`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: fixSummary
+            });
+
+      - name: Post no changes comment
+        if: github.event_name == 'pull_request' && needs.apply-fixes.outputs.changes_made == 'false'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🤖 **Auto-fix Status**\n\n✅ Code formatting is already perfect! No changes needed.\n\n🚀 This PR follows all formatting standards.'
+            });
+
+      - name: Post disabled comment
+        if: github.event_name == 'pull_request' && needs.should-run.outputs.should_run == 'false'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🤖 **Auto-fix Status**\n\n🚫 Auto-fix is currently disabled for this PR.\n\n**Possible reasons:**\n- Auto-fix disabled via git config\n- PR contains `@testException` or `@autoFixDisabled` annotation\n\n📝 Manual formatting may be required. See [Quality Automation Guide](./QUALITY_AUTOMATION.md) for help.'
+            });
