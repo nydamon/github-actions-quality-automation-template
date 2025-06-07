@@ -1,0 +1,81 @@
+# PR Agent Configuration for TheCreditPros
+# Customizes AI-powered PR analysis and description generation
+
+[pr_description]
+# Auto-generate comprehensive PR descriptions
+publish_description = true
+add_original_user_description = true
+keep_original_user_title = true
+use_description_markers = true
+include_generated_by_tag = false
+
+# Description sections to include
+extra_instructions = "Focus on business impact and user-facing changes. Include security considerations for auth/payment related changes."
+enable_pr_type = true
+enable_summary = true
+enable_walkthrough = true
+enable_labels = true
+
+[pr_reviewer]
+# AI code review settings
+num_code_suggestions = 3
+inline_code_comments = true
+require_focused_review = true
+require_score = true
+require_tests = true
+require_security = true
+
+# Focus areas for review
+extra_instructions = "Pay special attention to: 1) Security vulnerabilities in auth/payment code, 2) React component prop validation, 3) Python type hints, 4) PHP error handling"
+
+[pr_code_suggestions]
+# Code improvement suggestions
+num_code_suggestions = 2
+rank_suggestions = true
+enable_help_text = true
+
+# Focus on practical improvements
+extra_instructions = "Prioritize: 1) Performance optimizations, 2) Error handling improvements, 3) Code readability, 4) Security enhancements"
+
+[pr_questions]
+# Interactive Q&A
+enable_help_text = true
+extra_instructions = "Answer questions about: 1) Code architecture decisions, 2) Testing strategies, 3) Security implications, 4) Performance impact"
+
+[pr_test]
+# Test generation assistance  
+enable_help_text = true
+testing_framework = "auto"
+extra_instructions = "Generate tests for: 1) Critical business logic, 2) Auth/payment flows, 3) API endpoints, 4) React components"
+
+[github]
+# GitHub integration settings
+publish_inline_comments = true
+persistent_comment_header = "## 🤖 AI Code Review"
+enable_auto_approval = false
+
+[openai]
+# OpenAI model configuration
+model = "gpt-4"
+temperature = 0.2
+max_tokens = 2048
+
+[config]
+# General configuration
+verbosity_level = 1
+use_repo_settings_file = true
+enable_custom_labels = true
+
+# Custom labels for PR categorization
+custom_labels = [
+    "🔒 security", 
+    "💳 payment", 
+    "🔐 auth", 
+    "🐛 bug", 
+    "✨ feature", 
+    "📚 docs", 
+    "🎨 style",
+    "♻️ refactor",
+    "⚡ performance",
+    "🧪 test"
+]
